@@ -119,6 +119,75 @@ std.manifestYamlDoc(
             },
           },
         },
+        DataviewJsRequest: {
+          description: 'Payload for executing DataviewJS code.',
+          type: 'object',
+          required: ['code'],
+          properties: {
+            code: {
+              type: 'string',
+              description: 'Raw DataviewJS to execute (exactly as you would inside Obsidian).',
+            },
+            filePath: {
+              type: 'string',
+              description: 'Note path to use as the Dataview execution context (defaults to the active file).',
+            },
+            timeoutMs: {
+              type: 'number',
+              minimum: 0,
+              description: 'Override the timeout in milliseconds. Defaults to 15000, or set to 0 to disable.',
+            },
+          },
+        },
+        DataviewJsBlock: {
+          description: 'Top-level HTML elements produced by the DataviewJS render.',
+          type: 'object',
+          required: ['tag', 'html'],
+          properties: {
+            tag: { type: 'string' },
+            text: { type: 'string' },
+            html: { type: 'string' },
+            attributes: {
+              type: 'object',
+              additionalProperties: { type: 'string' },
+            },
+          },
+        },
+        DataviewJsResponse: {
+          description: 'Rendered output returned by the DataviewJS execution endpoint.',
+          type: 'object',
+          required: ['source', 'html', 'text'],
+          properties: {
+            filePath: {
+              type: 'string',
+              description: 'File path used as Dataview execution context.',
+            },
+            source: {
+              type: 'object',
+              required: ['type'],
+              properties: {
+                type: {
+                  type: 'string',
+                  enum: ['code'],
+                },
+                value: { type: 'string' },
+              },
+            },
+            html: {
+              type: 'string',
+              description: 'Rendered HTML of the DataviewJS container.',
+            },
+            text: {
+              type: 'string',
+              description: 'Plain-text content extracted from the rendered container.',
+            },
+            blocks: {
+              type: 'array',
+              description: 'Serialized list of top-level elements returned by Dataview.',
+              items: { '$ref': '#/components/schemas/DataviewJsBlock' },
+            },
+          },
+        },
       },
     },
     security: [
@@ -644,6 +713,73 @@ std.manifestYamlDoc(
                       },
                     },
                   },
+                },
+              },
+            },
+          },
+        },
+      },
+      '/dataviewjs/': {
+        post: {
+          tags: [
+            'Search',
+          ],
+          summary: 'Execute DataviewJS code\n',
+          description: 'Execute DataviewJS code and return the rendered output. Provide the exact script you would run inside Obsidian, optionally overriding the execution `filePath` or timeout.\n',
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: { '$ref': '#/components/schemas/DataviewJsRequest' },
+                examples: {
+                  run_code: {
+                    summary: 'Execute inline DataviewJS code',
+                    value: {
+                      code: 'dv.list([1, 2, 3])',
+                    },
+                  },
+                  run_code_args: {
+                    summary: 'Call dv.view from within code',
+                    value: {
+                      code: "await dv.view(\"02_Core/Journey_Map/_EXAMPLES/views/signal_source_flow_dashboard\", { status: 'active' })",
+                      filePath: '02_Core/Journey_Map/_EXAMPLES/Flows/signal_source_setup.md',
+                      timeoutMs: 30000,
+                    },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            '200': {
+              description: 'Rendered HTML/text output returned successfully.',
+              content: {
+                'application/json': {
+                  schema: { '$ref': '#/components/schemas/DataviewJsResponse' },
+                },
+              },
+            },
+            '400': {
+              description: 'The provided DataviewJS payload could not be processed (invalid JSON or missing `code`).\n',
+              content: {
+                'application/json': {
+                  schema: { '$ref': '#/components/schemas/Error' },
+                },
+              },
+            },
+            '401': {
+              description: 'Requests to this endpoint require an API Key to be specified\nin the \'Authorization\' header using the value \'Bearer <API_KEY>\'.\n',
+              content: {
+                'application/json': {
+                  schema: { '$ref': '#/components/schemas/Error' },
+                },
+              },
+            },
+            '422': {
+              description: 'DataviewJS execution failed (for example, Dataview is disabled for the referenced file or the script threw an error).\n',
+              content: {
+                'application/json': {
+                  schema: { '$ref': '#/components/schemas/Error' },
                 },
               },
             },

@@ -167,6 +167,38 @@ export class PluginManifest {
 
 export class SettingTab {}
 
+export class Component {
+  private _children: Component[] = [];
+
+  load(): void {}
+
+  unload(): void {
+    for (const child of this._children) {
+      child.unload();
+    }
+    this._children = [];
+  }
+
+  onload(): void {}
+  onunload(): void {}
+
+  addChild<T extends Component>(component: T): T {
+    this._children.push(component);
+    return component;
+  }
+
+  removeChild<T extends Component>(component: T): T {
+    this._children = this._children.filter((child) => child !== component);
+    return component;
+  }
+
+  register(cb: () => any): void {
+    cb();
+  }
+
+  registerEvent(): void {}
+}
+
 export const apiVersion = "1.0.0";
 
 export class SearchResult {

@@ -14,6 +14,15 @@
     "allowSyntheticDefaultImports": true,
     "lib": ["DOM", "ES5", "ES6", "ES7"]
   },
-  "include": ["**/*.ts"],
-  "exclude": ["**/*.test.ts"]
+  "include": [
+    "src/**/*.ts",
+    "docs/**/*.ts",
+    "mocks/**/*.ts",
+    "*.ts"
+  ],
+  "exclude": [
+    "**/*.test.ts",
+    "node_modules",
+    "obsidian-dataview"
+  ]
 }

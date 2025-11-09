@@ -3,6 +3,7 @@ import {
   App,
   CachedMetadata,
   Command,
+  Component,
   PluginManifest,
   prepareSimpleSearch,
   TFile,
@@ -58,6 +59,8 @@ import LocalRestApiPublicApi from "./api";
 
 // Import openapi.yaml as a string
 import openapiYaml from "../docs/openapi.yaml";
+
+const DefaultDataviewJsTimeoutMs = 15000;
 
 export default class RequestHandler {
   app: App;
@@ -262,10 +265,10 @@ export default class RequestHandler {
       certificateInfo:
         this.requestIsAuthenticated(req) && certificate
           ? {
-              validityDays: getCertificateValidityDays(certificate),
-              regenerateRecommended:
-                !getCertificateIsUptoStandards(certificate),
-            }
+            validityDays: getCertificateValidityDays(certificate),
+            regenerateRecommended:
+              !getCertificateIsUptoStandards(certificate),
+          }
           : undefined,
       apiExtensions: this.requestIsAuthenticated(req)
         ? this.apiExtensions.map(({ manifest }) => manifest)
@@ -1051,6 +1054,133 @@ export default class RequestHandler {
     return Boolean(value);
   }
 
+  private serializeDataviewBlocks(container: HTMLElement) {
+    return Array.from(container.children).map((child) => {
+      const element = child as HTMLElement;
+      const attributes: Record<string, string> = {};
+
+      for (const attr of Array.from(element.attributes)) {
+        attributes[attr.name] = attr.value;
+      }
+
+      return {
+        tag: element.tagName?.toLowerCase() ?? "",
+        text: element.textContent ?? "",
+        html: element.outerHTML,
+        attributes,
+      };
+    });
+  }
+
+  private containerHasRenderableContent(element: HTMLElement): boolean {
+    if (Boolean(element.textContent?.trim().length)) {
+      return true;
+    }
+
+    for (const child of Array.from(element.children)) {
+      if (this.containerHasRenderableContent(child as HTMLElement)) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  private async waitForDataviewRender(
+    container: HTMLElement,
+    component: Component,
+    timeoutMs: number
+  ): Promise<void> {
+    if (this.containerHasRenderableContent(container)) {
+      console.log("[DataviewJS] container already populated; skipping wait");
+      return;
+    }
+
+    const effectiveTimeout = timeoutMs > 0 ? timeoutMs : DefaultDataviewJsTimeoutMs;
+
+    await new Promise<void>((resolve) => {
+      let settled = false;
+
+      const finish = (reason: string) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        observer.disconnect();
+        if (timeoutId !== undefined) {
+          window.clearTimeout(timeoutId);
+        }
+        console.log(
+          "[DataviewJS] waitForDataviewRender finish",
+          reason,
+          "htmlLen=",
+          container.innerHTML.length
+        );
+        resolve();
+      };
+
+      const observer = new MutationObserver(() => {
+        if (this.containerHasRenderableContent(container)) {
+          finish("mutation");
+        }
+      });
+
+      observer.observe(container, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+      });
+
+      const timeoutId = window.setTimeout(
+        () => finish("timeout"),
+        effectiveTimeout
+      );
+      component.register(() => finish("component-unload"));
+    });
+  }
+
+  private getDataviewContextFilePath(candidate?: string): string {
+    if (typeof candidate === "string" && candidate.trim().length > 0) {
+      return candidate;
+    }
+
+    const activeFile = this.app.workspace.getActiveFile();
+    if (activeFile) {
+      return activeFile.path;
+    }
+
+    const [firstFile] = this.app.vault.getMarkdownFiles();
+    if (firstFile) {
+      return firstFile.path;
+    }
+
+    return "";
+  }
+
+  private async resolveWithTimeout<T>(
+    promise: Promise<T>,
+    timeoutMs: number
+  ): Promise<T> {
+    if (timeoutMs <= 0) {
+      return promise;
+    }
+
+    let timeoutHandle: number | undefined;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeoutHandle = window.setTimeout(() => {
+        reject(new Error(`DataviewJS execution timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+    });
+
+    try {
+      return await Promise.race([promise, timeoutPromise]);
+    } finally {
+      if (timeoutHandle !== undefined) {
+        window.clearTimeout(timeoutHandle);
+      }
+    }
+  }
+
   async searchQueryPost(
     req: express.Request,
     res: express.Response
@@ -1136,6 +1266,112 @@ export default class RequestHandler {
       });
       return;
     }
+  }
+
+  async dataviewJsPost(
+    req: express.Request,
+    res: express.Response
+  ): Promise<void> {
+    const dataviewApi = getDataviewAPI();
+
+    if (!dataviewApi) {
+      this.returnCannedResponse(res, {
+        errorCode: ErrorCode.InvalidFilterQuery,
+        message:
+          "Dataview API is not available. Ensure the Dataview plugin is installed and enabled.",
+      });
+      return;
+    }
+
+    const rawBody =
+      req.body instanceof Buffer ? req.body.toString("utf-8") : req.body;
+    let scriptSource: string | undefined;
+
+    if (typeof rawBody === "string") {
+      scriptSource = rawBody;
+    } else if (rawBody && typeof rawBody.code === "string") {
+      scriptSource = rawBody.code;
+    }
+
+    if (!scriptSource || scriptSource.trim().length === 0) {
+      this.returnCannedResponse(res, {
+        errorCode: ErrorCode.InvalidFilterQuery,
+        message:
+          "No DataviewJS code provided. Supply a 'code' string in the request body or send the code directly as the request body.",
+      });
+      return;
+    }
+
+    const timeoutMs =
+      rawBody &&
+        typeof rawBody === "object" &&
+        typeof rawBody.timeoutMs === "number" &&
+        Number.isFinite(rawBody.timeoutMs)
+        ? rawBody.timeoutMs
+        : DefaultDataviewJsTimeoutMs;
+    const filePath = this.getDataviewContextFilePath(
+      rawBody &&
+        typeof rawBody === "object" &&
+        typeof rawBody.filePath === "string"
+        ? rawBody.filePath
+        : undefined
+    );
+
+    const container = document.createElement("div");
+    container.classList.add("olrapi-dataviewjs-container");
+
+    const component = new Component();
+    component.load();
+    let renderSnapshot: HTMLElement | null = null;
+
+    try {
+      await this.resolveWithTimeout(
+        dataviewApi.executeJs(scriptSource, container, component, filePath),
+        timeoutMs
+      );
+      console.log(
+        "[DataviewJS] after executeJs",
+        container.innerHTML.substring(0, 200)
+      );
+      await this.waitForDataviewRender(container, component, timeoutMs);
+      console.log(
+        "[DataviewJS] after waitForDataviewRender",
+        container.innerHTML.substring(0, 200)
+      );
+      renderSnapshot = container.cloneNode(true) as HTMLElement;
+    } catch (error) {
+      renderSnapshot = container.cloneNode(true) as HTMLElement;
+      this.returnCannedResponse(res, {
+        errorCode: ErrorCode.InvalidFilterQuery,
+        message: `${error.message}`,
+      });
+      return;
+    } finally {
+      component.unload();
+    }
+
+    const snapshot =
+      renderSnapshot ?? (container.cloneNode(true) as HTMLElement);
+    const html = snapshot.innerHTML;
+    const textContent = snapshot.textContent ?? "";
+    const blocks = this.serializeDataviewBlocks(snapshot);
+
+    console.log(
+      "[DataviewJS] response payload htmlLen=",
+      html.length,
+      "textLen=",
+      textContent.length,
+      "blocks=",
+      blocks.length
+    );
+
+    res.json({
+      filePath,
+      source: { type: "code" },
+      html,
+      text: textContent,
+      blocks,
+    });
   }
 
   async openPost(req: express.Request, res: express.Response): Promise<void> {
@@ -1288,6 +1524,7 @@ export default class RequestHandler {
 
     this.api.route("/search/").post(this.searchQueryPost.bind(this));
     this.api.route("/search/simple/").post(this.searchSimplePost.bind(this));
+    this.api.route("/dataviewjs/").post(this.dataviewJsPost.bind(this));
 
     this.api.route("/open/*").post(this.openPost.bind(this));
 
